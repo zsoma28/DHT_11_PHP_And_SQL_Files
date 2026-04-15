@@ -1,94 +1,60 @@
 <?php
-// Példa hívás:
-// http://localhost/sensor/insert_data.php?api_key=123456789&temperature=25.5&humidity=101325
-
-// --- Adatbázis kapcsolat beállításai ---
+// Adatbázis konfiguráció
 $servername = "localhost";
 $username   = "root";
 $password   = "";
 $dbname     = "sensor_data";
+$valid_api_key = "123456789"; // Ezt cseréld ki a sajátodra!
 
-// --- Segédfüggvény: API kulcs beolvasása (X-API-Key header vagy GET paraméter) ---
-function get_api_key(): ?string {
-    // Headerből
-    if (function_exists('getallheaders')) {
-        $headers = getallheaders();
-        if (isset($headers['X-API-Key']) && trim($headers['X-API-Key']) !== '') {
-            return trim($headers['X-API-Key']);
-        }
-        // Egyes szerverek kisbetűsítik:
-        if (isset($headers['x-api-key']) && trim($headers['x-api-key']) !== '') {
-            return trim($headers['x-api-key']);
-        }
-    }
-    // GET paraméterből
-    if (isset($_GET['api_key']) && trim($_GET['api_key']) !== '') {
-        return trim($_GET['api_key']);
-    }
-    return null;
-}
-
-// --- Kapcsolódás az adatbázishoz ---
 $conn = new mysqli($servername, $username, $password, $dbname);
 if ($conn->connect_error) {
-    http_response_code(500);
-    die("Kapcsolódási hiba: " . $conn->connect_error);
+    header('Content-Type: application/json');
+    die(json_encode(["error" => "Kapcsolódási hiba"]));
 }
 
-// --- API kulcs ellenőrzése (ELSŐ LÉPÉS) ---
-$apiKey = get_api_key();
-if ($apiKey === null) {
-    http_response_code(401);
-    $conn->close();
-    die("Hiányzó API kulcs! Add meg az X-API-Key fejléccel vagy az api_key paraméterrel.");
-}
-
-$check = $conn->prepare("SELECT id FROM api_keys WHERE api_key = ? AND is_active = 1 LIMIT 1");
-$check->bind_param("s", $apiKey);
-$check->execute();
-$check->store_result();
-
-if ($check->num_rows === 0) {
-    http_response_code(401);
-    $check->close();
-    $conn->close();
-    die("Érvénytelen vagy inaktív API kulcs!");
-}
-// opcionális: utolsó használat frissítése
-$update = $conn->prepare("UPDATE api_keys SET last_used_at = NOW() WHERE api_key = ?");
-$update->bind_param("s", $apiKey);
-$update->execute();
-$update->close();
-$check->close();
-
-// --- Paraméterek ellenőrzése és mentése ---
+// --- ADATBEVÉTEL (Szenzor küldi) ---
 if (isset($_GET['temperature']) && isset($_GET['humidity'])) {
-    $temperature = filter_var($_GET['temperature'], FILTER_VALIDATE_FLOAT);
-    $humidity    = filter_var($_GET['humidity'], FILTER_VALIDATE_FLOAT);
+    header('Content-Type: text/plain; charset=utf-8');
 
-    if ($temperature === false || $humidity === false) {
-        http_response_code(400);
-        echo "Érvénytelen paraméterek!";
-    } else {
-        $stmt = $conn->prepare("INSERT INTO measurements (temperature, humidity, created_at) VALUES (?, ?, NOW())");
-        if (!$stmt) {
-            http_response_code(500);
-            echo "Előkészítési hiba: " . $conn->error;
-        } else {
-            $stmt->bind_param("dd", $temperature, $humidity);
-            if ($stmt->execute()) {
-                echo "Adatok sikeresen rögzítve.";
-            } else {
-                http_response_code(500);
-                echo "Hiba történt: " . $stmt->error;
-            }
-            $stmt->close();
-        }
+    // API kulcs ellenőrzése
+    $provided_key = $_GET['api_key'] ?? '';
+    if ($provided_key !== $valid_api_key) {
+        http_response_code(403);
+        die("Hiba: Érvénytelen API kulcs!");
     }
-} else {
-    http_response_code(400);
-    echo "Hiányzó paraméterek! (temperature, humidity)";
+
+    $temp = filter_var($_GET['temperature'], FILTER_VALIDATE_FLOAT);
+    $humi = filter_var($_GET['humidity'], FILTER_VALIDATE_FLOAT);
+
+    if ($temp !== false && $humi !== false) {
+        $stmt = $conn->prepare("INSERT INTO measurements (temperature, humidity, created_at) VALUES (?, ?, NOW())");
+        $stmt->bind_param("dd", $temp, $humi);
+        if ($stmt->execute()) {
+            echo "Siker: Adat rögzítve!";
+        } else {
+            http_response_code(500);
+            echo "Mentési hiba: " . $conn->error;
+        }
+        $stmt->close();
+    } else {
+        http_response_code(400);
+        echo "Hiba: Érvénytelen számformátum.";
+    }
+    $conn->close();
+    exit;
 }
 
+// --- ADATSZOLGÁLTATÁS (Dashboard olvassa) ---
+header('Content-Type: application/json');
+$sql = "SELECT id, temperature, humidity, created_at FROM measurements ORDER BY id DESC LIMIT 20";
+$result = $conn->query($sql);
+
+$data = [];
+if ($result) {
+    while($row = $result->fetch_assoc()) {
+        $data[] = $row;
+    }
+}
+echo json_encode(array_reverse($data)); // Időrendbe rakjuk a grafikonhoz
 $conn->close();
 ?>
